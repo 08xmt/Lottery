@@ -10,8 +10,8 @@ interface IERC20 {
 
 interface IERC4626 is IERC20 {
     function asset() external returns(address);
-    function deposit(address to, uint amountIn) external returns(uint sharesReceived);
-    function withdraw(address from, address to, uint amountOut) external returns(uint sharesBurned);
+    function deposit(uint assets, address receiver) external returns(uint sharesReceived);
+    function withdraw(uint assets, address receiver, address owner) external returns(uint sharesBurned);
 }
 
 contract CharityLottery is VRFSubscriptionManager{
@@ -109,7 +109,7 @@ contract CharityLottery is VRFSubscriptionManager{
         TicketIndex memory ticketIndex = tickets[winner][purchaseIndex];
         if(ticketIndex.start <= jackpotLot && ticketIndex.end > jackpotLot){
             //Withdraw winnings to winner
-            vault.withdraw(address(this), winner, totalSupply + donations);
+            vault.withdraw(totalSupply + donations, winner, address(this));
             //Send remaining vault supply to charity
             vault.transfer(charity, vault.balanceOf(address(this)));
             return true;
