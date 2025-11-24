@@ -1,3 +1,6 @@
+//SPDX-License-Identifier: MIT
+//@author 0xmt
+
 pragma solidity ^0.8.24;
 
 import {VRFSubscriptionManager} from "src/VRFSubscriptionManager.sol";
