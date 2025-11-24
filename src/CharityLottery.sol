@@ -23,13 +23,14 @@ contract CharityLottery is VRFSubscriptionManager{
 
     uint public totalSupply;
     uint public donations;
-    IERC20 public depositToken;
-    IERC4626 public vault;
-    mapping(address => TicketIndex[]) public tickets;
-    uint public period;
-    uint public jackpotChanceBps;
-    mapping(uint => uint) public drawRequestId;
-    mapping(uint => uint) public lotDrawn;
+    IERC20 public immutable depositToken;
+    IERC4626 public immutable vault;
+    mapping(address => TicketIndex[]) public tickets; //user => TicketIndex(start, end) 
+    uint public immutable period;
+    uint public immutable jackpotChanceBps;
+    mapping(uint => uint) public drawRequestId; //periodIndex => drawRequstId
+    mapping(uint => uint) public lotDrawn; //periodIndex => lotDrawn
+    bool public isDrawing;
     bool public jackpot;
     uint public jackpotLot;
 
@@ -41,10 +42,13 @@ contract CharityLottery is VRFSubscriptionManager{
     event Donation(uint amount);
 
     constructor(uint _period, uint _jackpotChanceBps, address _vrfCoordinator, address _vault, address _owner, address _charity) VRFSubscriptionManager(_vrfCoordinator, _owner) {
+        require(_owner != address(0));
+        require(_jackpotChanceBps > 0 && _jackpotChanceBps <= 10_000, "Jackpot chance out of bounds");
         period = _period;
         jackpotChanceBps = _jackpotChanceBps;
         depositToken = IERC20(IERC4626(_vault).asset());
         vault = IERC4626(_vault);
+        charity = _charity;
         _createNewSubscription();
     }
 
@@ -54,8 +58,9 @@ contract CharityLottery is VRFSubscriptionManager{
 
     function purchaseTicketTo(uint amountIn, address receiver) public {
         require(!jackpot, "Jackpot has been hit");
+        require(!isDrawing, "Draw in progress");
         depositToken.transferFrom(msg.sender, address(this), amountIn);
-        tickets[receiver].push(TicketIndex(totalSupply, totalSupply + amountIn)); //Todo: Check if need to +1
+        tickets[receiver].push(TicketIndex(totalSupply, totalSupply + amountIn));
         totalSupply += amountIn;
         vault.deposit(amountIn, address(this));
         require(totalSupply * 10_000 < type(uint).max, "totalSupply exceed safe amount");
@@ -69,33 +74,42 @@ contract CharityLottery is VRFSubscriptionManager{
     }
 
     function initiateDraw() external {
-        require(drawRequestId[block.timestamp % period] == 0, "Already drawn for this period");
-        drawRequestId[block.timestamp % period] = requestRandomWords();
+        require(period - block.timestamp % period > 120, "Cant draw in the last 120 seconds of a period");
+        uint periodIndex = block.timestamp / period;
+        require(drawRequestId[periodIndex] == 0, "Already drawn for this period");
+        isDrawing = true;
+        drawRequestId[periodIndex] = requestRandomWords();
     }
     
     function fulfillRandomWords(uint256 requestId, uint256[] memory randomWords) internal override {
-        require(drawRequestId[block.timestamp % period] == requestId, "Wrong requestId");
+        require(drawRequestId[block.timestamp / period] == requestId, "Wrong requestId");
+        isDrawing = false;
         _draw(randomWords[0]);
     }
 
-    function _draw(uint entropy) internal returns(uint lot){
-        uint lotNumbers = totalSupply * 10_000 / jackpotChanceBps;
-        uint entropyUpperBound = type(uint).max / lotNumbers;
+    function _draw(uint randomNumber) internal returns(uint lot){
+        //Since tickets are 0 indexed, maxTicketNumber is one less than totalSupply
+        uint maxTicketNumber = totalSupply - 1;
+        //Adding duds to lot numbers, if a lot is drawn above max ticket number, there's no winner this drawing
+        uint lotNumbers = maxTicketNumber * 10_000 / jackpotChanceBps;
+        //Entropy upper bound is largest multiple of lotNumbers less than max randomNumber (2^256-1)
+        uint randomNumberUpperBound = type(uint).max - type(uint).max % (type(uint).max / lotNumbers);
 
-        //Get rid of modulo bias (very cheap)
-        while(entropy > entropyUpperBound){
-            entropy = uint(keccak256(abi.encodePacked(entropy)));
+        //Get rid of modulo bias cheaply to make drawings completely fair
+        while(randomNumber > randomNumberUpperBound){
+            randomNumber = uint(keccak256(abi.encodePacked(randomNumber)));
         }
 
-        lot = entropy % lotNumbers;
-        lotDrawn[block.timestamp % period] = lot;
-        if(lot < totalSupply){
+        uint periodIndex = block.timestamp / period;
+        lot = randomNumber % lotNumbers;
+        lotDrawn[periodIndex] = lot;
+        if(lot < maxTicketNumber){
             jackpot = true;
             jackpotLot = lot;
-            cancelSubscription();
-            emit Jackpot(lot, totalSupply + donations);
+            cancelSubscription(); //Cancel VRF Oracle subscription and send remaining funds to owner
+            emit Jackpot(lot, maxTicketNumber + donations);
         }
-        emit Draw(block.timestamp % period, lot, jackpot);
+        emit Draw(periodIndex, lot, jackpot);
     }
 
     function claimJackpot() external {
@@ -111,7 +125,10 @@ contract CharityLottery is VRFSubscriptionManager{
             //Withdraw winnings to winner
             vault.withdraw(totalSupply + donations, winner, address(this));
             //Send remaining vault supply to charity
-            vault.transfer(charity, vault.balanceOf(address(this)));
+            if(charity != address(0))
+                vault.transfer(charity, vault.balanceOf(address(this)));
+            else
+                vault.transfer(owner, vault.balanceOf(address(this)));
             return true;
         }
         return false;
